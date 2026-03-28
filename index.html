@@ -1,0 +1,956 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>💰 小金持ち山登り 💰</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  font-family: 'Helvetica Neue', Arial, sans-serif;
+  overflow: hidden;
+}
+canvas {
+  border-radius: 12px;
+  box-shadow: 0 0 40px rgba(0,0,0,0.5);
+}
+#ui-overlay {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  pointer-events: none;
+}
+#start-screen, #clear-screen {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  background: rgba(0,0,0,0.8);
+  padding: 40px 60px;
+  border-radius: 20px;
+  pointer-events: auto;
+  text-align: center;
+}
+#start-screen h1 { color: #ffd700; font-size: 36px; margin-bottom: 10px; }
+#start-screen p { color: #fff; font-size: 16px; margin-bottom: 20px; line-height: 1.6; }
+#clear-screen h1 { color: #ffd700; font-size: 42px; margin-bottom: 10px; }
+#clear-screen p { color: #fff; font-size: 20px; margin-bottom: 10px; line-height: 1.6; }
+#clear-screen .big-money { color: #ffd700; font-size: 60px; font-weight: bold; margin: 10px 0; }
+.btn {
+  background: linear-gradient(135deg, #ffd700, #f0a500);
+  color: #1a1a2e;
+  border: none;
+  padding: 15px 40px;
+  font-size: 22px;
+  font-weight: bold;
+  border-radius: 50px;
+  cursor: pointer;
+  transition: transform 0.2s;
+  margin-top: 10px;
+}
+.btn:hover { transform: scale(1.1); }
+#mobile-controls {
+  display: none;
+  position: fixed;
+  bottom: 20px;
+  left: 0; right: 0;
+  justify-content: space-between;
+  padding: 0 20px;
+  pointer-events: none;
+  z-index: 10;
+}
+.mobile-btn-group {
+  display: flex;
+  gap: 10px;
+  pointer-events: auto;
+}
+.mobile-btn {
+  width: 65px; height: 65px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.25);
+  border: 2px solid rgba(255,255,255,0.5);
+  color: #fff;
+  font-size: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+@media (pointer: coarse) {
+  #mobile-controls { display: flex; }
+}
+</style>
+</head>
+<body>
+
+<canvas id="game"></canvas>
+
+<div id="ui-overlay">
+  <div id="start-screen">
+    <h1>💰 小金持ち山登り</h1>
+    <p>お金を拾いながら山の頂上を目指せ！<br>
+    ← → で移動、↑ or スペース でジャンプ<br>
+    クリック/タップでも移動できるよ！</p>
+    <button class="btn" id="start-btn">スタート！</button>
+  </div>
+  <div id="clear-screen">
+    <h1>🎊 登頂成功！🎊</h1>
+    <p>山頂に到達しました！</p>
+    <div class="big-money" id="final-money">¥0</div>
+    <p id="clear-msg"></p>
+    <button class="btn" id="retry-btn">もう一度挑戦</button>
+  </div>
+</div>
+
+<div id="mobile-controls">
+  <div class="mobile-btn-group">
+    <div class="mobile-btn" id="btn-left">◀</div>
+    <div class="mobile-btn" id="btn-right">▶</div>
+  </div>
+  <div class="mobile-btn-group">
+    <div class="mobile-btn" id="btn-jump">▲</div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Canvas size
+const W = 800, H = 600;
+canvas.width = W;
+canvas.height = H;
+
+// Scale canvas for mobile
+function resizeCanvas() {
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H, 1);
+  canvas.style.width = (W * scale) + 'px';
+  canvas.style.height = (H * scale) + 'px';
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// Game state
+let gameState = 'start'; // start, playing, clear
+let camera = { y: 0 };
+let player, platforms, coins, particles, goalFlag;
+let totalMoney = 0;
+let coinPickupCombo = 0;
+let comboTimer = 0;
+
+// Mountain height (how far up to climb)
+const MOUNTAIN_HEIGHT = 4000;
+const PLATFORM_COUNT = 120;
+
+// Input
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.code] = true; e.preventDefault(); });
+window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// Mobile controls
+const mobileKeys = { left: false, right: false, jump: false };
+function setupMobile(id, key) {
+  const el = document.getElementById(id);
+  el.addEventListener('touchstart', e => { e.preventDefault(); mobileKeys[key] = true; });
+  el.addEventListener('touchend', e => { e.preventDefault(); mobileKeys[key] = false; });
+  el.addEventListener('mousedown', e => { mobileKeys[key] = true; });
+  el.addEventListener('mouseup', e => { mobileKeys[key] = false; });
+}
+setupMobile('btn-left', 'left');
+setupMobile('btn-right', 'right');
+setupMobile('btn-jump', 'jump');
+
+// Mouse/touch click-to-move
+let mouseTarget = null; // { x, y } in world coords
+let mouseDown = false;
+
+canvas.addEventListener('mousedown', e => {
+  if (gameState !== 'playing') return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = W / rect.width;
+  const scaleY = H / rect.height;
+  const screenX = (e.clientX - rect.left) * scaleX;
+  const screenY = (e.clientY - rect.top) * scaleY;
+  // Convert screen to world coords
+  mouseTarget = { x: screenX, y: screenY - camera.y };
+  mouseDown = true;
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (!mouseDown || gameState !== 'playing') return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = W / rect.width;
+  const scaleY = H / rect.height;
+  const screenX = (e.clientX - rect.left) * scaleX;
+  const screenY = (e.clientY - rect.top) * scaleY;
+  mouseTarget = { x: screenX, y: screenY - camera.y };
+});
+
+canvas.addEventListener('mouseup', () => { mouseDown = false; mouseTarget = null; });
+canvas.addEventListener('mouseleave', () => { mouseDown = false; mouseTarget = null; });
+
+canvas.addEventListener('touchstart', e => {
+  if (gameState !== 'playing') return;
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = W / rect.width;
+  const scaleY = H / rect.height;
+  const touch = e.touches[0];
+  const screenX = (touch.clientX - rect.left) * scaleX;
+  const screenY = (touch.clientY - rect.top) * scaleY;
+  mouseTarget = { x: screenX, y: screenY - camera.y };
+  mouseDown = true;
+});
+
+canvas.addEventListener('touchmove', e => {
+  if (!mouseDown || gameState !== 'playing') return;
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = W / rect.width;
+  const scaleY = H / rect.height;
+  const touch = e.touches[0];
+  const screenX = (touch.clientX - rect.left) * scaleX;
+  const screenY = (touch.clientY - rect.top) * scaleY;
+  mouseTarget = { x: screenX, y: screenY - camera.y };
+});
+
+canvas.addEventListener('touchend', () => { mouseDown = false; mouseTarget = null; });
+
+// Show start screen
+document.getElementById('start-screen').style.display = 'flex';
+
+document.getElementById('start-btn').addEventListener('click', startGame);
+document.getElementById('retry-btn').addEventListener('click', startGame);
+
+function startGame() {
+  document.getElementById('start-screen').style.display = 'none';
+  document.getElementById('clear-screen').style.display = 'none';
+  gameState = 'playing';
+  totalMoney = 0;
+  coinPickupCombo = 0;
+  comboTimer = 0;
+  particles = [];
+  initLevel();
+}
+
+function initLevel() {
+  // Player
+  player = {
+    x: W / 2 - 15,
+    y: -30,
+    w: 30, h: 40,
+    vx: 0, vy: 0,
+    onGround: false,
+    facing: 1,
+    walkFrame: 0,
+    jumpHeld: false
+  };
+
+  // Generate platforms going up
+  platforms = [];
+  // Ground
+  platforms.push({ x: 0, y: 0, w: W, h: 30, type: 'ground' });
+
+  // Generate mountain platforms
+  for (let i = 0; i < PLATFORM_COUNT; i++) {
+    const progress = i / PLATFORM_COUNT;
+    const y = -(i + 1) * (MOUNTAIN_HEIGHT / PLATFORM_COUNT);
+    // Platforms get narrower as you go up (but still reachable)
+    const minW = Math.max(100, 220 - progress * 80);
+    const maxW = Math.max(140, 300 - progress * 100);
+    const pw = minW + Math.random() * (maxW - minW);
+    const px = Math.random() * (W - pw);
+
+    // Vertical gap varies
+    const type = Math.random() < 0.15 ? 'ice' : (Math.random() < 0.1 ? 'bounce' : 'normal');
+    platforms.push({ x: px, y: y, w: pw, h: 16, type: type });
+  }
+
+  // Coins on/near platforms
+  coins = [];
+  for (let i = 1; i < platforms.length; i++) {
+    const p = platforms[i];
+    // 1-3 coins per platform
+    const numCoins = 1 + Math.floor(Math.random() * 3);
+    for (let j = 0; j < numCoins; j++) {
+      const progress = -p.y / MOUNTAIN_HEIGHT;
+      // Higher coins are worth more (total ~5000万 at top)
+      let value;
+      if (progress < 0.3) value = [500, 1000, 2000][Math.floor(Math.random() * 3)];
+      else if (progress < 0.6) value = [5000, 10000, 20000][Math.floor(Math.random() * 3)];
+      else if (progress < 0.85) value = [50000, 100000, 200000][Math.floor(Math.random() * 3)];
+      else value = [500000, 1000000, 2000000][Math.floor(Math.random() * 3)];
+
+      coins.push({
+        x: p.x + Math.random() * (p.w - 20),
+        y: p.y - 30 - Math.random() * 40,
+        w: 20, h: 20,
+        value: value,
+        collected: false,
+        bobPhase: Math.random() * Math.PI * 2
+      });
+    }
+  }
+
+  // Bonus floating coins (between platforms)
+  for (let i = 0; i < 30; i++) {
+    const y = -(Math.random() * MOUNTAIN_HEIGHT);
+    const progress = -y / MOUNTAIN_HEIGHT;
+    let value;
+    if (progress > 0.8) value = 1000000;
+    else if (progress > 0.5) value = 200000;
+    else value = 10000;
+    coins.push({
+      x: Math.random() * (W - 20),
+      y: y,
+      w: 24, h: 24,
+      value: value,
+      collected: false,
+      bobPhase: Math.random() * Math.PI * 2,
+      floating: true
+    });
+  }
+
+  // Goal flag at top
+  goalFlag = {
+    x: W / 2 - 20,
+    y: -MOUNTAIN_HEIGHT - 60,
+    w: 40, h: 60
+  };
+
+  camera.y = H - 60;
+}
+
+// Particles
+function spawnParticles(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x: x, y: y,
+      vx: (Math.random() - 0.5) * 6,
+      vy: (Math.random() - 0.5) * 6 - 2,
+      life: 1,
+      decay: 0.02 + Math.random() * 0.03,
+      color: color,
+      size: 2 + Math.random() * 4
+    });
+  }
+}
+
+function spawnMoneyText(x, y, value) {
+  let text;
+  if (value >= 10000) text = '+' + (value / 10000) + '万円';
+  else text = '+' + value.toLocaleString() + '円';
+  particles.push({
+    x: x, y: y,
+    vx: 0, vy: -1.5,
+    life: 1,
+    decay: 0.015,
+    text: text,
+    color: value >= 100000 ? '#e056fd' : value >= 10000 ? '#ff6b6b' : value >= 1000 ? '#ffd700' : '#fff',
+    size: value >= 100000 ? 22 : value >= 10000 ? 18 : 14
+  });
+}
+
+// Update
+function update() {
+  if (gameState !== 'playing') return;
+
+  const p = player;
+  let moveLeft = keys['ArrowLeft'] || keys['KeyA'] || mobileKeys.left;
+  let moveRight = keys['ArrowRight'] || keys['KeyD'] || mobileKeys.right;
+  let jumpKey = keys['ArrowUp'] || keys['KeyW'] || keys['Space'] || mobileKeys.jump;
+
+  // Mouse/touch click-to-move
+  if (mouseTarget && mouseDown) {
+    const dx = mouseTarget.x - (p.x + p.w / 2);
+    const dy = mouseTarget.y - (p.y + p.h / 2);
+    // Move horizontally toward target
+    if (dx < -15) moveLeft = true;
+    else if (dx > 15) moveRight = true;
+    // Jump if target is above player
+    if (dy < -40 && p.onGround) jumpKey = true;
+  }
+
+  // Horizontal movement
+  const accel = p.onGround ? 1.2 : 0.6;
+  const friction = p.onGround ? 0.88 : 0.96;
+
+  if (moveLeft) { p.vx -= accel; p.facing = -1; }
+  if (moveRight) { p.vx += accel; p.facing = 1; }
+  p.vx *= friction;
+
+  // Jump (stronger!)
+  if (jumpKey && p.onGround && !p.jumpHeld) {
+    p.vy = -16;
+    p.onGround = false;
+    p.jumpHeld = true;
+  }
+  if (!jumpKey) p.jumpHeld = false;
+
+  // Variable jump height (only for keyboard)
+  if (!jumpKey && !mouseDown && p.vy < -4) {
+    p.vy = -4;
+  }
+
+  // Gravity (lighter for easier play)
+  p.vy += 0.45;
+  if (p.vy > 12) p.vy = 12;
+
+  // Move
+  p.x += p.vx;
+  p.y += p.vy;
+
+  // Wrap horizontal
+  if (p.x < -p.w) p.x = W;
+  if (p.x > W) p.x = -p.w;
+
+  // Walk animation
+  if (Math.abs(p.vx) > 0.5 && p.onGround) {
+    p.walkFrame += 0.15;
+  }
+
+  // Platform collision
+  p.onGround = false;
+  for (const plat of platforms) {
+    if (p.vy >= 0 &&
+        p.x + p.w > plat.x && p.x < plat.x + plat.w &&
+        p.y + p.h >= plat.y && p.y + p.h <= plat.y + plat.h + 12) {
+      p.y = plat.y - p.h;
+      p.vy = 0;
+      p.onGround = true;
+
+      if (plat.type === 'ice') {
+        // Slippery!
+        p.vx *= 0.98;
+      } else if (plat.type === 'bounce') {
+        p.vy = -18;
+        p.onGround = false;
+        spawnParticles(p.x + p.w/2, p.y + p.h, '#ff69b4', 8);
+      }
+    }
+  }
+
+  // Coin collection
+  comboTimer -= 1;
+  if (comboTimer <= 0) coinPickupCombo = 0;
+
+  for (const coin of coins) {
+    if (coin.collected) continue;
+    coin.bobPhase += 0.05;
+    const bobY = Math.sin(coin.bobPhase) * 4;
+    const cy = coin.y + bobY;
+
+    if (p.x + p.w > coin.x && p.x < coin.x + coin.w &&
+        p.y + p.h > cy && p.y < cy + coin.h) {
+      coin.collected = true;
+      coinPickupCombo++;
+      comboTimer = 60;
+      const multiplier = Math.min(coinPickupCombo, 5);
+      const gained = coin.value * multiplier;
+      totalMoney += gained;
+      spawnParticles(coin.x + coin.w/2, cy + coin.h/2, '#ffd700', 6);
+      spawnMoneyText(coin.x, cy - 10, gained);
+      if (multiplier > 1) {
+        spawnMoneyText(coin.x + 30, cy - 25, 0);
+        // Replace last particle text with combo
+        particles[particles.length - 1].text = 'x' + multiplier + ' COMBO!';
+        particles[particles.length - 1].color = '#ff6b6b';
+      }
+    }
+  }
+
+  // Check goal
+  if (p.x + p.w > goalFlag.x && p.x < goalFlag.x + goalFlag.w &&
+      p.y + p.h > goalFlag.y && p.y < goalFlag.y + goalFlag.h) {
+    gameState = 'clear';
+    showClearScreen();
+  }
+
+  // Fall death - respawn at last safe platform
+  const screenY = p.y + camera.y;
+  if (screenY > H + 200) {
+    // Lose some money
+    const lost = Math.floor(totalMoney * 0.1);
+    totalMoney -= lost;
+    if (totalMoney < 0) totalMoney = 0;
+
+    // Find nearest visible platform
+    let bestPlat = platforms[0];
+    for (const plat of platforms) {
+      const platScreen = plat.y + camera.y;
+      if (platScreen > 0 && platScreen < H) {
+        bestPlat = plat;
+        break;
+      }
+    }
+    p.x = bestPlat.x + bestPlat.w / 2 - p.w / 2;
+    p.y = bestPlat.y - p.h - 10;
+    p.vx = 0;
+    p.vy = 0;
+
+    if (lost > 0) {
+      spawnMoneyText(p.x, p.y - 20, 0);
+      particles[particles.length - 1].text = '-¥' + lost.toLocaleString();
+      particles[particles.length - 1].color = '#ff4444';
+    }
+  }
+
+  // Camera follows player (smooth, both up and down)
+  const targetCamY = H * 0.5 - (p.y + p.h / 2);
+  camera.y += (targetCamY - camera.y) * 0.1;
+
+  // Particles
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const pt = particles[i];
+    pt.x += pt.vx;
+    pt.y += pt.vy;
+    pt.life -= pt.decay;
+    if (pt.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// Draw
+function draw() {
+  // Sky gradient based on height
+  const progress = Math.min(1, camera.y / MOUNTAIN_HEIGHT);
+  const skyTop = lerpColor([26, 26, 46], [20, 60, 120], progress);
+  const skyBot = lerpColor([40, 40, 80], [135, 200, 255], progress);
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, `rgb(${skyTop.join(',')})`);
+  grad.addColorStop(1, `rgb(${skyBot.join(',')})`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars (visible at lower altitude)
+  if (progress < 0.5) {
+    ctx.globalAlpha = 1 - progress * 2;
+    for (let i = 0; i < 50; i++) {
+      const sx = (i * 137.5 + camera.y * 0.02) % W;
+      const sy = (i * 97.3 + camera.y * 0.01) % H;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(sx, sy, 2, 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // Clouds at high altitude
+  if (progress > 0.3) {
+    ctx.globalAlpha = Math.min(0.4, (progress - 0.3) * 0.8);
+    for (let i = 0; i < 5; i++) {
+      const cx = (i * 180 + camera.y * 0.05) % (W + 200) - 100;
+      const cy = H * 0.3 + i * 80 + Math.sin(Date.now() / 3000 + i) * 20;
+      drawCloud(cx, cy);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if (gameState === 'start') { ctx.restore?.(); return; }
+
+  ctx.save();
+  ctx.translate(0, camera.y);
+
+  // Mountain background silhouettes
+  drawMountainBG();
+
+  // Platforms
+  for (const plat of platforms) {
+    if (plat.y + camera.y > H + 50 || plat.y + camera.y < -50) continue;
+
+    if (plat.type === 'ground') {
+      ctx.fillStyle = '#4a6741';
+      ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+      // Grass
+      ctx.fillStyle = '#6ab04c';
+      ctx.fillRect(plat.x, plat.y, plat.w, 6);
+    } else if (plat.type === 'ice') {
+      ctx.fillStyle = '#a8d8ea';
+      ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+      ctx.fillStyle = '#d4f1f9';
+      ctx.fillRect(plat.x + 2, plat.y + 2, plat.w - 4, 4);
+      // Sparkle
+      ctx.fillStyle = '#fff';
+      for (let s = 0; s < 3; s++) {
+        const sx = plat.x + 10 + s * (plat.w / 3);
+        ctx.fillRect(sx, plat.y + 3, 3, 3);
+      }
+    } else if (plat.type === 'bounce') {
+      ctx.fillStyle = '#ff69b4';
+      ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+      ctx.fillStyle = '#ff99cc';
+      ctx.fillRect(plat.x + 2, plat.y + 2, plat.w - 4, 4);
+      // Spring lines
+      ctx.strokeStyle = '#ff1493';
+      ctx.lineWidth = 2;
+      for (let s = 0; s < 3; s++) {
+        const sx = plat.x + 8 + s * (plat.w / 3);
+        ctx.beginPath();
+        ctx.moveTo(sx, plat.y + 8);
+        ctx.lineTo(sx + 6, plat.y + 14);
+        ctx.lineTo(sx + 12, plat.y + 8);
+        ctx.stroke();
+      }
+    } else {
+      // Rock platform - color by altitude
+      const altProgress = Math.min(1, -plat.y / MOUNTAIN_HEIGHT);
+      if (altProgress > 0.8) {
+        ctx.fillStyle = '#e8e8e8'; // Snow
+      } else if (altProgress > 0.5) {
+        ctx.fillStyle = '#888'; // Rock
+      } else {
+        ctx.fillStyle = '#6d5a3a'; // Earth/dirt
+      }
+      // Platform shape
+      ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+      // Top highlight
+      ctx.fillStyle = altProgress > 0.8 ? '#fff' : altProgress > 0.5 ? '#aaa' : '#8b7355';
+      ctx.fillRect(plat.x + 2, plat.y, plat.w - 4, 4);
+    }
+  }
+
+  // Coins
+  for (const coin of coins) {
+    if (coin.collected) continue;
+    if (coin.y + camera.y > H + 50 || coin.y + camera.y < -50) continue;
+
+    const bobY = Math.sin(coin.bobPhase) * 4;
+    const cx = coin.x + coin.w / 2;
+    const cy = coin.y + bobY + coin.h / 2;
+    const r = coin.w / 2;
+
+    // Glow for high value
+    if (coin.value >= 1000) {
+      ctx.globalAlpha = 0.3 + Math.sin(Date.now() / 200) * 0.1;
+      ctx.fillStyle = '#ffd700';
+      ctx.beginPath();
+      ctx.arc(cx, cy, r + 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+
+    // Coin body - color by value
+    let coinColor;
+    if (coin.value >= 1000000) coinColor = '#e056fd';
+    else if (coin.value >= 100000) coinColor = '#ff4757';
+    else if (coin.value >= 10000) coinColor = '#ff6b6b';
+    else if (coin.value >= 1000) coinColor = '#ffd700';
+    else coinColor = '#d4a440';
+    ctx.fillStyle = coinColor;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Coin shine
+    ctx.fillStyle = 'rgba(255,255,255,0.4)';
+    ctx.beginPath();
+    ctx.arc(cx - r * 0.25, cy - r * 0.25, r * 0.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Value text
+    ctx.fillStyle = '#fff';
+    ctx.font = `bold ${coin.value >= 1000 ? 8 : 9}px Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    let label;
+    if (coin.value >= 1000000) label = (coin.value / 10000) + '万';
+    else if (coin.value >= 10000) label = (coin.value / 10000) + '万';
+    else label = coin.value >= 1000 ? (coin.value / 1000) + 'K' : '¥' + coin.value;
+    ctx.font = `bold ${coin.value >= 100000 ? 7 : 8}px Arial`;
+    ctx.fillText(label, cx, cy);
+  }
+
+  // Goal flag
+  {
+    const fy = goalFlag.y;
+    const fx = goalFlag.x + goalFlag.w / 2;
+    // Pole
+    ctx.strokeStyle = '#ccc';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(fx, fy + goalFlag.h);
+    ctx.lineTo(fx, fy - 20);
+    ctx.stroke();
+    // Flag
+    const wave = Math.sin(Date.now() / 300) * 3;
+    ctx.fillStyle = '#ff4757';
+    ctx.beginPath();
+    ctx.moveTo(fx, fy - 20);
+    ctx.lineTo(fx + 30 + wave, fy - 10);
+    ctx.lineTo(fx, fy);
+    ctx.fill();
+    // Star on flag
+    ctx.fillStyle = '#ffd700';
+    ctx.font = '14px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('★', fx + 14 + wave / 2, fy - 7);
+    // "GOAL" text
+    ctx.fillStyle = '#ffd700';
+    ctx.font = 'bold 16px Arial';
+    ctx.fillText('GOAL!', fx, fy - 30);
+    // Summit platform
+    ctx.fillStyle = '#e8e8e8';
+    ctx.fillRect(goalFlag.x - 30, fy + goalFlag.h, 100, 16);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(goalFlag.x - 28, fy + goalFlag.h, 96, 4);
+  }
+
+  // Click target indicator
+  if (mouseTarget && mouseDown) {
+    ctx.globalAlpha = 0.4 + Math.sin(Date.now() / 150) * 0.2;
+    ctx.strokeStyle = '#ffd700';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(mouseTarget.x, mouseTarget.y, 12, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(mouseTarget.x - 6, mouseTarget.y);
+    ctx.lineTo(mouseTarget.x + 6, mouseTarget.y);
+    ctx.moveTo(mouseTarget.x, mouseTarget.y - 6);
+    ctx.lineTo(mouseTarget.x, mouseTarget.y + 6);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  // Player
+  drawPlayer();
+
+  // Particles
+  for (const pt of particles) {
+    ctx.globalAlpha = pt.life;
+    if (pt.text) {
+      ctx.fillStyle = pt.color;
+      ctx.font = `bold ${pt.size}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.fillText(pt.text, pt.x, pt.y);
+    } else {
+      ctx.fillStyle = pt.color;
+      ctx.fillRect(pt.x - pt.size/2, pt.y - pt.size/2, pt.size, pt.size);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.restore();
+
+  // HUD
+  drawHUD();
+}
+
+function drawPlayer() {
+  if (!player) return;
+  const p = player;
+  ctx.save();
+  ctx.translate(p.x + p.w / 2, p.y + p.h / 2);
+  if (p.facing < 0) ctx.scale(-1, 1);
+
+  // Tail
+  ctx.strokeStyle = '#c8860a';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  const tailWave = Math.sin(Date.now() / 200) * 4;
+  ctx.moveTo(-14, 2);
+  ctx.quadraticCurveTo(-22, -5 + tailWave, -20, -14 + tailWave);
+  ctx.stroke();
+  // Tail tuft
+  ctx.fillStyle = '#8B5E0A';
+  ctx.beginPath();
+  ctx.arc(-20, -14 + tailWave, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Legs (animated)
+  const legSwing = p.onGround ? Math.sin(p.walkFrame * 3) * 5 : -3;
+  ctx.fillStyle = '#c8860a';
+  // Back legs
+  ctx.fillRect(-9, 10, 7, 12 + legSwing);
+  ctx.fillRect(3, 10, 7, 12 - legSwing);
+  // Paws
+  ctx.fillStyle = '#e6a117';
+  ctx.fillRect(-10, 21 + legSwing, 9, 4);
+  ctx.fillRect(2, 21 - legSwing, 9, 4);
+
+  // Body
+  ctx.fillStyle = '#d4920a';
+  ctx.fillRect(-12, -6, 25, 20);
+  // Belly
+  ctx.fillStyle = '#f0c040';
+  ctx.fillRect(-6, 0, 14, 12);
+
+  // Mane (fluffy circle around head)
+  ctx.fillStyle = '#8B5E0A';
+  for (let angle = 0; angle < Math.PI * 2; angle += 0.5) {
+    const mx = Math.cos(angle) * 14;
+    const my = -14 + Math.sin(angle) * 14;
+    ctx.beginPath();
+    ctx.arc(mx, my, 7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Head
+  ctx.fillStyle = '#d4920a';
+  ctx.beginPath();
+  ctx.arc(0, -14, 12, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Inner ears
+  ctx.fillStyle = '#f0c040';
+  ctx.beginPath();
+  ctx.arc(-7, -24, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(7, -24, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Eyes (white)
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(-4, -16, 4, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(5, -16, 4, 0, Math.PI * 2);
+  ctx.fill();
+  // Pupils
+  ctx.fillStyle = '#222';
+  ctx.beginPath();
+  ctx.arc(-3, -16, 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(6, -16, 2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Nose
+  ctx.fillStyle = '#333';
+  ctx.beginPath();
+  ctx.arc(1, -10, 3, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Mouth
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(1, -7);
+  ctx.lineTo(-2, -4);
+  ctx.moveTo(1, -7);
+  ctx.lineTo(4, -4);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawMountainBG() {
+  // Distant mountains
+  ctx.globalAlpha = 0.15;
+  ctx.fillStyle = '#4a69bd';
+  for (let i = 0; i < 3; i++) {
+    const baseY = -MOUNTAIN_HEIGHT * 0.3 - i * 800;
+    ctx.beginPath();
+    ctx.moveTo(0, baseY + 600);
+    for (let x = 0; x <= W; x += 50) {
+      const y = baseY + Math.sin(x * 0.008 + i * 2) * 200 + Math.sin(x * 0.003 + i) * 300;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, baseY + 600);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawCloud(x, y) {
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(x, y, 30, 0, Math.PI * 2);
+  ctx.arc(x + 30, y - 10, 25, 0, Math.PI * 2);
+  ctx.arc(x + 50, y, 20, 0, Math.PI * 2);
+  ctx.arc(x + 25, y + 5, 22, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawHUD() {
+  // Money display
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(10, 10, 280, 50);
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 22px Arial';
+  ctx.textAlign = 'left';
+  // Format money display
+  let moneyStr;
+  if (totalMoney >= 100000000) moneyStr = (totalMoney / 100000000).toFixed(1) + '億';
+  else if (totalMoney >= 10000) moneyStr = Math.floor(totalMoney / 10000).toLocaleString() + '万' + (totalMoney % 10000 > 0 ? Math.floor(totalMoney % 10000).toLocaleString() : '') + '円';
+  else moneyStr = totalMoney.toLocaleString() + '円';
+  ctx.fillText('💰 ' + moneyStr, 20, 43);
+
+  // Combo display
+  if (coinPickupCombo > 1 && comboTimer > 0) {
+    ctx.fillStyle = '#ff6b6b';
+    ctx.font = 'bold 18px Arial';
+    ctx.fillText('COMBO x' + Math.min(coinPickupCombo, 5) + '!', 300, 43);
+  }
+
+  // Altitude meter
+  const progress = Math.min(1, camera.y / MOUNTAIN_HEIGHT);
+  const meterH = H - 40;
+  const meterX = W - 30;
+
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(meterX - 8, 15, 20, meterH + 10);
+
+  // Meter fill
+  const fillH = meterH * progress;
+  const meterGrad = ctx.createLinearGradient(0, 20 + meterH - fillH, 0, 20 + meterH);
+  meterGrad.addColorStop(0, '#e8e8e8');
+  meterGrad.addColorStop(0.3, '#888');
+  meterGrad.addColorStop(0.7, '#6d5a3a');
+  meterGrad.addColorStop(1, '#6ab04c');
+  ctx.fillStyle = meterGrad;
+  ctx.fillRect(meterX - 4, 20 + meterH - fillH, 12, fillH);
+
+  // Player position marker
+  ctx.fillStyle = '#ff6b6b';
+  ctx.beginPath();
+  ctx.arc(meterX + 2, 20 + meterH - fillH, 6, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Flag at top
+  ctx.fillStyle = '#ff4757';
+  ctx.font = '14px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('🏁', meterX + 2, 18);
+
+  // Altitude percentage
+  ctx.fillStyle = '#fff';
+  ctx.font = '12px Arial';
+  ctx.fillText(Math.floor(progress * 100) + '%', meterX + 2, 20 + meterH + 22);
+}
+
+function showClearScreen() {
+  document.getElementById('final-money').textContent = '¥' + totalMoney.toLocaleString();
+  let msg = '';
+  if (totalMoney >= 50000000) msg = '💎 伝説の小金持ち！資産5000万超え！';
+  else if (totalMoney >= 30000000) msg = '🏆 立派な小金持ち！3000万達成！';
+  else if (totalMoney >= 10000000) msg = '🎉 1000万突破！いい調子！';
+  else if (totalMoney >= 5000000) msg = '👍 500万！まだまだいける！';
+  else msg = '😅 もっとお金を集めよう！';
+  document.getElementById('clear-msg').textContent = msg;
+  document.getElementById('clear-screen').style.display = 'flex';
+}
+
+function lerpColor(a, b, t) {
+  return a.map((v, i) => Math.round(v + (b[i] - v) * t));
+}
+
+// Game loop
+function loop() {
+  update();
+  draw();
+  requestAnimationFrame(loop);
+}
+loop();
+</script>
+</body>
+</html>
